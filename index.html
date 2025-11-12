@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TechLux — Premium Mobile Reviews</title>
+  <meta name="description" content="TechLux — Expert smartphone reviews, deep specs & buying advice. Read trusted reviews and comparisons." />
+  <meta name="robots" content="index, follow" />
+  <!-- Adsense placeholder - Replace with your AdSense code after approval -->
+  <!-- <script data-ad-client="ca-pub-XXXXXXXXXXXX" async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script> -->
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Shadcn-style utility classes can be used directly with Tailwind. -->
+
+  <!-- Firebase (compat for simplicity) -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+    :root{--glass-bg:rgba(255,255,255,0.03);--muted:#94a3b8}
+    *{font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{background:linear-gradient(180deg,#0f172a 0%,#020617 100%);min-height:100vh}
+    .gradient-text{background:linear-gradient(90deg,#fbbf24,#f97316);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .glass{background:var(--glass-bg);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.04)}
+    .loading{width:22px;height:22px;border:3px solid rgba(255,255,255,.15);border-top-color:#fff;border-radius:50%;animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body class="text-white">
+
+<!-- Root container where JS renders pages -->
+<div id="root"></div>
+
+<!-- Templates: modals and helper UI (hidden by default) -->
+<div id="modals" class="hidden">
+  <!-- Login Modal -->
+  <div id="loginModalTpl" class="fixed inset-0 z-50 flex items-center justify-center p-6 hidden">
+    <div class="w-full max-w-md bg-slate-800 p-6 rounded-2xl glass border border-slate-700">
+      <h3 class="text-2xl font-bold gradient-text mb-2">Admin Login</h3>
+      <p class="text-slate-400 mb-4">Sign in with your email (Firebase Auth). Admin panel visible only to authorized admins.</p>
+      <form id="loginFormTpl" class="space-y-4">
+        <input id="emailInputTpl" type="email" placeholder="Email" required class="w-full p-3 rounded bg-slate-900 border border-slate-700" />
+        <input id="passInputTpl" type="password" placeholder="Password" required class="w-full p-3 rounded bg-slate-900 border border-slate-700" />
+        <div class="flex justify-between items-center">
+          <button type="button" onclick="closeLoginModal()" class="px-4 py-2 bg-slate-700 rounded">Cancel</button>
+          <button type="submit" class="px-4 py-2 bg-amber-500 text-slate-900 rounded font-semibold">Sign In</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Phone detail modal -->
+  <div id="phoneModalTpl" class="fixed inset-0 z-50 flex items-center justify-center p-6 hidden">
+    <div class="w-full max-w-3xl bg-slate-800 p-6 rounded-2xl glass border border-slate-700 overflow-auto max-h-[90vh]">
+      <div id="phoneModalContent"></div>
+      <div class="mt-4 text-right"><button onclick="closePhoneModal()" class="px-4 py-2 bg-slate-700 rounded">Close</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// =========================================
+// TechLux v2 — Single-file site (AdSense-ready structure)
+// Features:
+// - Tailwind UI, modern layout
+// - Firebase Auth (email/password), DB, Storage
+// - Admin panel visibility controlled by /admins node in Realtime DB
+// - Placeholders for AdSense script
+// =========================================
+
+// =============
+// CONFIG — REPLACE firebaseConfig WITH YOUR PROJECT VALUES
+// =============
+const firebaseConfig = {
+  apiKey: "REPLACE_WITH_YOUR_API_KEY",
+  authDomain: "YOUR-PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR-PROJECT",
+  storageBucket: "YOUR-PROJECT.appspot.com",
+  messagingSenderId: "SENDER_ID",
+  appId: "APP_ID"
+};
+
+// list of safe admin emails (keeps convenience) — production should use /admins node and custom claims
+// const ADMIN_EMAILS = ['admin@techlux.com'];
+
+// Initialize Firebase
+let db, auth, storage;
+try{
+  firebase.initializeApp(firebaseConfig);
+  auth = firebase.auth();
+  db = firebase.database();
+  storage = firebase.storage();
+  console.log('Firebase initialized');
+}catch(e){console.warn('Firebase not configured or blocked', e)}
+
+// App state
+const state = {
+  currentPage: 'home',
+  loading: true,
+  phones: [],
+  articles: [],
+  user: null,
+  isAdmin: false,
+  adminUid: null,
+};
+
+// DOM helpers
+function e(id){return document.getElementById(id)}
+function $(sel){return document.querySelector(sel)}
+function html(str){const div=document.createElement('div');div.innerHTML=str;return div.firstElementChild}
+
+// Modal controls (rendered directly into DOM root)
+function showLoginModal(){document.querySelector('#loginModalTpl').classList.remove('hidden')}
+function closeLoginModal(){document.querySelector('#loginModalTpl').classList.add('hidden')}
+function showPhoneModal(){document.querySelector('#phoneModalTpl').classList.remove('hidden')}
+function closePhoneModal(){document.querySelector('#phoneModalTpl').classList.add('hidden')}
+
+// =============
+// Data loading from Firebase
+// =============
+function subscribePhones(){
+  if(!db) { state.phones=[]; state.loading=false; render(); return }
+  db.ref('phones').on('value', snapshot=>{
+    const data = snapshot.val() || {};
+    state.phones = Object.keys(data).map(k=>({id:k,...data[k]})).sort((a,b)=> (b.createdAt||0)-(a.createdAt||0));
+    state.loading=false; render();
+  })
+}
+function subscribeArticles(){
+  if(!db) { state.articles=[]; render(); return }
+  db.ref('articles').on('value', snapshot=>{
+    const data = snapshot.val() || {};
+    state.articles = Object.keys(data).map(k=>({id:k,...data[k]})).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)); render();
+  })
+}
+
+// Upload helper
+function uploadImageFile(file){
+  return new Promise(resolve=>{
+    if(!file || !storage) return resolve(null);
+    const ref = storage.ref().child('images/'+Date.now()+'_'+file.name);
+    const task = ref.put(file);
+    task.on('state_changed', ()=>{}, err=>{console.error(err); resolve(null)}, ()=>{task.snapshot.ref.getDownloadURL().then(url=>resolve(url))});
+  })
+}
+
+// =============
+// Auth + Admin visibility
+// =============
+
+// After sign in, check if user is admin by querying /admins/{uid} node.
+async function checkAdmin(user){
+  state.user = user;
+  state.isAdmin = false;
+  state.adminUid = null;
+  if(!user || !db) { render(); return }
+  try{
+    const snap = await db.ref('admins/'+user.uid).get();
+    if(snap.exists() && snap.val() === true){ state.isAdmin = true; state.adminUid = user.uid }
+    // fallback: also allow certain emails if you configured them
+    // if(ADMIN_EMAILS.includes(user.email)) state.isAdmin = true;
+  }catch(e){console.error('admin check failed', e)}
+  render();
+}
+
+// wire auth listener
+if(auth){
+  auth.onAuthStateChanged(user=>{
+    checkAdmin(user);
+  })
+}
+
+// Demo sign-in (email/password)
+async function signIn(e){
+  e.preventDefault();
+  const email = document.getElementById('emailInputTpl').value.trim();
+  const pass = document.getElementById('passInputTpl').value.trim();
+  if(!email || !pass) return alert('Enter email & password');
+  try{
+    await auth.signInWithEmailAndPassword(email, pass);
+    closeLoginModal();
+    alert('Signed in');
+  }catch(err){
+    console.error(err);
+    alert('Sign in failed: '+err.message);
+  }
+}
+
+async function signOut(){
+  if(!auth) return; await auth.signOut(); alert('Signed out');
+}
+
+// =============
+// CRUD operations (admin only)
+// =============
+async function addPhone(e){
+  e.preventDefault();
+  if(!state.isAdmin) return alert('Admin only');
+  const form = e.target;
+  const data = Object.fromEntries(new FormData(form).entries());
+  data.rating = parseFloat(data.rating)||0; data.score = parseFloat(data.score)||0;
+  data.pros = (data.pros||'').split(',').map(s=>s.trim()).filter(Boolean);
+  data.cons = (data.cons||'').split(',').map(s=>s.trim()).filter(Boolean);
+  data.createdAt = Date.now();
+  // upload image
+  const f = form.querySelector('input[name="imageFile"]').files[0];
+  if(f){ const url = await uploadImageFile(f); if(url) data.image=url }
+  if(data.imageUrl) data.image = data.imageUrl;
+  const newRef = db.ref('phones').push();
+  await newRef.set(data);
+  form.reset(); alert('Phone added');
+}
+
+async function addArticle(e){
+  e.preventDefault(); if(!state.isAdmin) return alert('Admin only');
+  const form = e.target; const data = Object.fromEntries(new FormData(form).entries()); data.createdAt=Date.now();
+  const f = form.querySelector('input[name="imageFileA"]').files[0]; if(f){ const url=await uploadImageFile(f); if(url) data.image=url }
+  if(data.imageUrl) data.image = data.imageUrl;
+  const newRef = db.ref('articles').push(); await newRef.set(data); form.reset(); alert('Article added');
+}
+
+async function deletePhone(id){ if(!state.isAdmin) return alert('Admin only'); if(!confirm('Delete phone?')) return; await db.ref('phones/'+id).remove(); }
+async function deleteArticle(id){ if(!state.isAdmin) return alert('Admin only'); if(!confirm('Delete article?')) return; await db.ref('articles/'+id).remove(); }
+
+// =============
+// UI rendering (single-file SPA rendering into #root)
+// =============
+
+function renderHeader(){
+  return `
+  <header class="fixed top-0 left-0 right-0 z-40 bg-slate-900/80 backdrop-blur glass border-b border-slate-800">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-20">
+        <div class="flex items-center space-x-3 cursor-pointer" onclick="navigate('home')">
+          <div class="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-600 rounded-xl flex items-center justify-center text-2xl font-bold shadow">TL</div>
+          <div>
+            <h1 class="text-2xl font-bold gradient-text">TechLux</h1>
+            <p class="text-xs text-slate-400">Premium Reviews</p>
+          </div>
+        </div>
+        <nav class="hidden md:flex items-center space-x-6">
+          <button onclick="navigate('home')" class="font-medium ${state.currentPage==='home'?'text-amber-400':'text-slate-300 hover:text-white'}">Home</button>
+          <button onclick="navigate('reviews')" class="font-medium ${state.currentPage==='reviews'?'text-amber-400':'text-slate-300 hover:text-white'}">All Reviews</button>
+          <button onclick="navigate('articles')" class="font-medium ${state.currentPage==='articles'?'text-amber-400':'text-slate-300 hover:text-white'}">Articles</button>
+          <button onclick="showSetupGuide()" class="font-medium text-green-400">🔧 Setup</button>
+          ${state.isAdmin?`<button onclick="navigate('admin')" class="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-600 rounded-lg font-semibold">Admin</button><button onclick="signOut()" class="px-4 py-2 bg-red-600 rounded-lg">Sign out</button>`:`<button onclick="openLoginModal()" class="px-4 py-2 bg-slate-800 rounded-lg">Admin Login</button>`}
+        </nav>
+        <div class="md:hidden">
+          <button onclick="toggleMobileMenu()" class="p-2 bg-slate-800 rounded">☰</button>
+        </div>
+      </div>
+    </div>
+  </header>
+  `
+}
+
+function renderHero(){
+  return `
+    <section class="pt-28 pb-12">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 items-center">
+          <div>
+            <h2 class="text-4xl md:text-5xl font-bold mb-4 gradient-text">TechLux — Smart Gadget Reviews You Can Trust</h2>
+            <p class="text-slate-300 mb-6 max-w-xl">In-depth reviews, comparison charts, and buying advice for smartphones, wearables, and accessories. Trusted by tech buyers.</p>
+            <div class="flex space-x-3">
+              <button onclick="navigate('reviews')" class="px-5 py-3 bg-amber-500 text-slate-900 rounded font-semibold">Browse Reviews</button>
+              <button onclick="navigate('articles')" class="px-5 py-3 border border-slate-700 rounded">Read Articles</button>
+            </div>
+            <div class="mt-8 text-sm text-slate-500">Join our newsletter for weekly tech guides — (newsletter integration optional)</div>
+          </div>
+          <div>
+            <div class="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-2xl glass border border-slate-700">
+              <h4 class="text-lg font-semibold mb-4">Trending Reviews</h4>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                ${state.phones.slice(0,4).map(p=>`<div class="flex items-center space-x-3"><img src="${p.image||'https://via.placeholder.com/120x120'}" class="w-20 h-20 object-cover rounded"/><div><div class="font-semibold">${p.name}</div><div class="text-sm text-slate-400">${p.price||''}</div></div></div>`).join('') || `<div class="text-slate-400">No phones yet</div>`}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `
+}
+
+function renderHome(){
+  return `
+    <main>
+      ${renderHero()}
+      <section class="py-6">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <h3 class="text-2xl font-bold mb-4">Latest Reviews</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            ${state.phones.map(p=>renderPhoneCard(p)).join('')}
+          </div>
+        </div>
+      </section>
+      <section class="py-8 bg-slate-900">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 rounded-2xl glass border border-slate-700">
+          <h3 class="text-xl font-bold mb-2">Latest Articles</h3>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            ${state.articles.slice(0,3).map(a=>renderArticleCard(a)).join('') || `<div class="text-slate-400">No articles yet</div>`}
+          </div>
+        </div>
+      </section>
+      <footer class="mt-12 border-t border-slate-800 py-8 text-center text-slate-400">© ${new Date().getFullYear()} TechLux • <a href="#" onclick="navigate('privacy')" class="text-slate-200">Privacy Policy</a> • <a href="#" onclick="navigate('terms')" class="text-slate-200">Terms</a></footer>
+    </main>
+  `
+}
+
+function renderPhoneCard(phone){
+  return `
+    <article class="bg-gradient-to-br from-slate-800 to-slate-900 p-4 rounded-2xl glass border border-slate-700">
+      <img src="${phone.image||'https://via.placeholder.com/600x400'}" class="w-full h-44 object-cover rounded mb-3"/>
+      <h4 class="font-bold text-lg mb-1">${phone.name}</h4>
+      <div class="text-amber-400 font-semibold mb-2">${phone.price||''}</div>
+      <p class="text-slate-400 text-sm mb-3">${phone.processor||''} • ${phone.ram||''} • ${phone.storage||''}</p>
+      <div class="flex justify-between items-center">
+        <div>
+          <div class="text-amber-500">${'★'.repeat(Math.floor(phone.rating||0))}${'☆'.repeat(5-Math.floor(phone.rating||0))}</div>
+          <div class="text-xs text-slate-400">Score: ${phone.score||0}</div>
+        </div>
+        <div>
+          <button onclick="viewPhone('${phone.id}')" class="px-4 py-2 bg-amber-500 text-slate-900 rounded">Full Review</button>
+        </div>
+      </div>
+    </article>
+  `
+}
+
+function renderArticleCard(a){
+  return `
+    <div class="bg-slate-800 p-4 rounded-2xl glass border border-slate-700">
+      <img src="${a.image||'https://via.placeholder.com/600x300'}" class="w-full h-36 object-cover rounded mb-3"/>
+      <h4 class="font-bold mb-1">${a.title}</h4>
+      <p class="text-slate-400 text-sm">${a.excerpt||''}</p>
+      <div class="mt-3 text-right"><button onclick="viewArticle('${a.id}')" class="text-amber-500 font-semibold">Read →</button></div>
+    </div>
+  `
+}
+
+function renderReviewsPage(){
+  return `
+    <main class="pt-24 pb-16">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl font-bold mb-6 gradient-text">All Reviews</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          ${state.phones.map(p=>renderPhoneCard(p)).join('')}
+        </div>
+      </div>
+    </main>
+  `
+}
+
+function renderArticlesPage(){
+  return `
+    <main class="pt-24 pb-16">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl font-bold mb-6 gradient-text">Articles</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          ${state.articles.map(a=>`
+            <div class="bg-slate-800 p-4 rounded-2xl glass border border-slate-700">
+              <h3 class="font-semibold mb-2">${a.title}</h3>
+              <p class="text-slate-400 text-sm mb-3">${a.excerpt||''}</p>
+              <div class="text-right"><button onclick="viewArticle('${a.id}')" class="text-amber-500 font-semibold">Read →</button></div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </main>
+  `
+}
+
+function renderPrivacy(){
+  return `
+    <main class="pt-24 pb-16 max-w-4xl mx-auto px-4">
+      <h2 class="text-2xl font-bold mb-4">Privacy Policy</h2>
+      <p class="text-slate-300">This is a sample privacy policy. Replace with your full policy text. Important for AdSense approval: clearly state data collection, cookies, and contact details.</p>
+    </main>
+  `
+}
+function renderTerms(){
+  return `
+    <main class="pt-24 pb-16 max-w-4xl mx-auto px-4">
+      <h2 class="text-2xl font-bold mb-4">Terms of Use</h2>
+      <p class="text-slate-300">Sample terms. Replace with your full terms and conditions.</p>
+    </main>
+  `
+}
+
+function renderAdminPanel(){
+  if(!state.isAdmin) return `
+    <main class="pt-24"><div class="max-w-7xl mx-auto px-4 py-20 text-center"><p class="text-slate-400">Admin area — please sign in.</p></div></main>
+  `;
+  return `
+    <main class="pt-24 pb-16">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl font-bold gradient-text mb-4">Admin Dashboard</h2>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-slate-800 p-4 rounded-2xl glass border border-slate-700">
+            <h3 class="font-semibold mb-3">Add New Phone</h3>
+            <form onsubmit="addPhone(event)" class="space-y-3">
+              <input name="name" placeholder="Phone name" class="w-full p-3 bg-slate-900 rounded" required />
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <input name="brand" placeholder="Brand" class="p-3 bg-slate-900 rounded" />
+                <input name="price" placeholder="Price" class="p-3 bg-slate-900 rounded" />
+              </div>
+              <input type="file" name="imageFile" accept="image/*" class="p-2 bg-slate-900 rounded" />
+              <input name="imageUrl" placeholder="Image URL (optional)" class="w-full p-3 bg-slate-900 rounded" />
+              <div class="grid grid-cols-2 gap-3">
+                <input name="processor" placeholder="Processor" class="p-3 bg-slate-900 rounded" />
+                <input name="ram" placeholder="RAM" class="p-3 bg-slate-900 rounded" />
+              </div>
+              <div class="grid grid-cols-2 gap-3">
+                <input name="storage" placeholder="Storage" class="p-3 bg-slate-900 rounded" />
+                <input name="battery" placeholder="Battery" class="p-3 bg-slate-900 rounded" />
+              </div>
+              <input name="camera" placeholder="Camera" class="p-3 bg-slate-900 rounded" />
+              <div class="grid grid-cols-2 gap-3">
+                <input name="rating" type="number" step="0.1" min="1" max="5" placeholder="Rating" class="p-3 bg-slate-900 rounded" />
+                <input name="score" type="number" step="0.1" min="1" max="10" placeholder="TechLux Score" class="p-3 bg-slate-900 rounded" />
+              </div>
+              <input name="pros" placeholder="Pros (comma)" class="p-3 bg-slate-900 rounded" />
+              <input name="cons" placeholder="Cons (comma)" class="p-3 bg-slate-900 rounded" />
+              <div class="text-right"><button class="px-4 py-2 bg-amber-500 text-slate-900 rounded">Add Phone</button></div>
+            </form>
+          </div>
+
+          <div class="bg-slate-800 p-4 rounded-2xl glass border border-slate-700">
+            <h3 class="font-semibold mb-3">Add New Article</h3>
+            <form onsubmit="addArticle(event)" class="space-y-3">
+              <input name="title" placeholder="Title" required class="w-full p-3 bg-slate-900 rounded" />
+              <input name="category" placeholder="Category" class="w-full p-3 bg-slate-900 rounded" />
+              <input type="file" name="imageFileA" accept="image/*" class="p-2 bg-slate-900 rounded" />
+              <input name="imageUrl" placeholder="Image URL (optional)" class="w-full p-3 bg-slate-900 rounded" />
+              <textarea name="excerpt" placeholder="Short excerpt" rows="4" class="w-full p-3 bg-slate-900 rounded"></textarea>
+              <div class="text-right"><button class="px-4 py-2 bg-amber-500 text-slate-900 rounded">Add Article</button></div>
+            </form>
+          </div>
+        </div>
+
+        <section class="mt-6">
+          <h4 class="font-semibold mb-3">Existing Phones</h4>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${state.phones.map(p=>`<div class=\"bg-slate-900 p-3 rounded flex justify-between items-center\"><div><strong>${p.name}</strong><div class=\"text-slate-400 text-sm\">${p.brand||''}</div></div><div class=\"flex space-x-2\"><button onclick=\"viewPhone('${p.id}')\" class=\"px-3 py-1 bg-amber-500 rounded\">View</button><button onclick=\"deletePhone('${p.id}')\" class=\"px-3 py-1 bg-red-600 rounded\">Delete</button></div></div>`).join('')}</div>
+        </section>
+      </div>
+    </main>
+  `
+}
+
+// Phone detail and article detail views
+function viewPhone(id){
+  const p = state.phones.find(x=>x.id===id); if(!p) return alert('Not found');
+  const html = `
+    <div>
+      <div class="flex items-start justify-between"><h3 class="text-2xl font-bold">${p.name}</h3><div class="text-amber-400 font-semibold">${p.score||0}/10</div></div>
+      <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="md:col-span-1"><img src="${p.image||'https://via.placeholder.com/600x400'}" class="w-full h-56 object-cover rounded"/></div>
+        <div class="md:col-span-2 text-slate-300">
+          <p><strong>Price:</strong> ${p.price||'N/A'}</p>
+          <p><strong>Processor:</strong> ${p.processor||'N/A'}</p>
+          <p><strong>RAM / Storage:</strong> ${p.ram||'N/A'} / ${p.storage||'N/A'}</p>
+          <p><strong>Camera:</strong> ${p.camera||'N/A'}</p>
+          <p><strong>Battery:</strong> ${p.battery||'N/A'}</p>
+          <div class="mt-4">
+            <h4 class="font-semibold">Pros</h4>
+            <ul class="list-disc pl-5 text-slate-300">${(p.pros||[]).map(s=>`<li>${s}</li>`).join('')||'<li>N/A</li>'}</ul>
+            <h4 class="font-semibold mt-3">Cons</h4>
+            <ul class="list-disc pl-5 text-slate-300">${(p.cons||[]).map(s=>`<li>${s}</li>`).join('')||'<li>N/A</li>'}</ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  document.querySelector('#phoneModalContent').innerHTML = html;
+  showPhoneModal();
+}
+
+function viewArticle(id){
+  const a = state.articles.find(x=>x.id===id); if(!a) return alert('Not found');
+  const html = `
+    <div>
+      <h2 class="text-2xl font-bold mb-3">${a.title}</h2>
+      <img src="${a.image||'https://via.placeholder.com/800x400'}" class="w-full h-56 object-cover rounded mb-4"/>
+      <div class="text-slate-300">${a.content||a.excerpt||'No content provided.'}</div>
+    </div>
+  `;
+  document.querySelector('#phoneModalContent').innerHTML = html; showPhoneModal();
+}
+
+// =============
+// Navigation & Router
+// =============
+function navigate(page){ state.currentPage = page; render(); window.scrollTo(0,0) }
+
+// show setup guide (small modal)
+function showSetupGuide(){ alert(`Setup Guide:
+1) Replace firebaseConfig with your values.
+2) Enable Realtime DB, Storage and Auth.
+3) To make admin: add /admins/{uid}: true in Realtime DB.`); }
+
+function openLoginModal(){ showLoginModal(); const form = document.getElementById('loginFormTpl'); if(form) { form.onsubmit = signIn } }
+
+// Mobile menu (simple)
+let mobileOpen=false;
+function toggleMobileMenu(){ mobileOpen = !mobileOpen; if(mobileOpen) { document.body.insertAdjacentHTML('beforeend', `<div id="mobileMenu" class="fixed inset-0 bg-black/60 z-50 p-4"><div class="bg-slate-900 p-4 rounded"><button onclick="document.getElementById('mobileMenu').remove();">Close</button><div class="mt-4"><button onclick="navigate('home');document.getElementById('mobileMenu').remove();">Home</button><button onclick="navigate('reviews');document.getElementById('mobileMenu').remove();">Reviews</button><button onclick="navigate('articles');document.getElementById('mobileMenu').remove();">Articles</button></div></div></div>`)} }
+
+// =============
+// Main render function
+// =============
+function render(){
+  const root = document.getElementById('root');
+  root.innerHTML = '';
+  root.insertAdjacentHTML('beforeend', renderHeader());
+  let content = '';
+  if(state.currentPage==='home') content = renderHome();
+  else if(state.currentPage==='reviews') content = renderReviewsPage();
+  else if(state.currentPage==='articles') content = renderArticlesPage();
+  else if(state.currentPage==='admin') content = renderAdminPanel();
+  else if(state.currentPage==='privacy') content = renderPrivacy();
+  else if(state.currentPage==='terms') content = renderTerms();
+  root.insertAdjacentHTML('beforeend', content);
+
+  // append modals templates (hidden) so functions can open them
+  if(!document.querySelector('#loginModalTpl')){
+    document.body.insertAdjacentHTML('beforeend', document.getElementById('modals').innerHTML);
+  }
+}
+
+// =============
+// Initial bootstrap: subscribe to data and render
+// =============
+render(); subscribePhones(); subscribeArticles();
+
+// Expose to window for inline onclicks
+window.navigate = navigate; window.viewPhone = viewPhone; window.viewArticle = viewArticle; window.openLoginModal = openLoginModal; window.signOut = signOut; window.addPhone = addPhone; window.addArticle = addArticle; window.deletePhone = deletePhone; window.deleteArticle = deleteArticle; window.showSetupGuide = showSetupGuide; window.closeLoginModal = closeLoginModal; window.closePhoneModal = closePhoneModal; window.toggleMobileMenu = toggleMobileMenu;
+</script>
+
+</body>
+</html>
